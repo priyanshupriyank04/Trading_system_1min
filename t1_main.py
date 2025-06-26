@@ -305,23 +305,10 @@ def create_nearest_otm_ohlc_tables(ce_symbol, pe_symbol):
                     low FLOAT,
                     close FLOAT,
                     volume FLOAT,
-                    ema_22 FLOAT,
-                    ema_33 FLOAT,
-                    hl2 FLOAT,
-                    atr FLOAT,
-                    initial_upper_bar FLOAT,
-                    initial_lower_bar FLOAT,
-                    supertrend_upper FLOAT,
-                    supertrend_lower FLOAT,
-                    os FLOAT,
-                    spt FLOAT,
+                    ema_5 FLOAT,                    
                     max_channel FLOAT,
                     min_channel FLOAT,
-                    supertrend_avg FLOAT,
-                    adx FLOAT,
-                    di_plus FLOAT,
-                    di_minus FLOAT
-
+                    supertrend_avg FLOAT
                 );
             """)
 
@@ -334,22 +321,10 @@ def create_nearest_otm_ohlc_tables(ce_symbol, pe_symbol):
                     low FLOAT,
                     close FLOAT,
                     volume FLOAT,
-                    ema_22 FLOAT,
-                    ema_33 FLOAT,
-                    hl2 FLOAT,
-                    atr FLOAT,
-                    initial_upper_bar FLOAT,
-                    initial_lower_bar FLOAT,
-                    supertrend_upper FLOAT,
-                    supertrend_lower FLOAT,
-                    os FLOAT,
-                    spt FLOAT,
+                    ema_5 FLOAT,
                     max_channel FLOAT,
                     min_channel FLOAT,
-                    supertrend_avg FLOAT,
-                    adx FLOAT,
-                    di_plus FLOAT,
-                    di_minus FLOAT
+                    supertrend_avg FLOAT
                 );
             """)
 
@@ -1068,3 +1043,316 @@ def calculate_supertrend_channel_for_table(table_name):
 calculate_supertrend_channel_for_table(nearest_contracts['CE']['table_1min'])
 calculate_supertrend_channel_for_table(nearest_contracts['PE']['table_1min'])
 
+
+def get_1min_table_for_token(token):
+    """
+    Returns the correct 1-min OHLC table name based on token (CE or PE).
+    """
+    conn = connect_to_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT ce_token, ce_table_1min, pe_token, pe_table_1min FROM nearest_otm_contracts LIMIT 1;")
+    result = cur.fetchone()
+
+    ce_token, ce_table_1min, pe_token, pe_table_1min = result
+
+    cur.close()
+    conn.close()
+
+    if token == ce_token:
+        return ce_table_1min
+    elif token == pe_token:
+        return pe_table_1min
+    else:
+        return None
+
+
+def get_symbol_from_token(token):
+    """
+    Returns the symbol (trading symbol) based on token (CE or PE).
+    """
+    conn = connect_to_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT ce_token, ce_symbol, pe_token, pe_symbol FROM nearest_otm_contracts LIMIT 1;")
+    result = cur.fetchone()
+
+    ce_token, ce_symbol, pe_token, pe_symbol = result
+
+    cur.close()
+    conn.close()
+
+    if token == ce_token:
+        return ce_symbol
+    elif token == pe_token:
+        return pe_symbol
+    else:
+        return None
+
+from kiteconnect import KiteConnect
+
+#  Initialize this global variable once before starting infinite loop
+last_5min_processed = None
+
+
+#Setting up live websocket connection, tick by tick handling and aggregation
+from kiteconnect import KiteTicker
+import logging
+import time
+import os
+import datetime
+from collections import defaultdict, deque
+
+#  Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+#  Zerodha API Credentials
+API_KEY = "8re7mjcm2btaozwf"  # Replace with your API key
+
+#  Fetch access token dynamically from the file
+with open("access_token.txt", "r") as f:
+    ACCESS_TOKEN = f.read().strip()
+
+#  Dynamically Prepare All Instrument Tokens for Subscription
+# From fetched contracts
+INSTRUMENT_TOKENS = [256265]  # NIFTY Index Token
+
+# Add all CE + PE contract tokens
+INSTRUMENT_TOKENS += [contract['token'] for contract in contracts['ce_contracts'] + contracts['pe_contracts']]
+
+logging.info(f" All Tokens to Subscribe for Live Ticks: {INSTRUMENT_TOKENS}")
+
+#  Initialize KiteTicker WebSocket
+kws = KiteTicker(API_KEY, ACCESS_TOKEN)
+
+
+#  Store Realtime OHLC for Current Candle for Each Symbol
+ohlc_data = {}  
+# Structure → {symbol: {'timestamp': current, 'open': o, 'high': h, 'low': l, 'close': c}}
+
+#  Kill Existing WebSocket Processes (Optional - Safe Cleanup)
+def kill_existing_websockets():
+    try:
+        os.system("pkill -f kiteconnect")  
+        logging.info(" Existing WebSocket instances killed successfully.")
+    except Exception as e:
+        logging.error(f" Error while killing existing WebSocket processes: {e}")
+
+#  Tick Buffers for 1-Minute OHLC Calculation
+tick_buffer = defaultdict(lambda: defaultdict(deque))
+# Structure → {symbol: {minute: deque([tick1, tick2, ...])}}
+
+#  Tick Buffers for 5-Minute OHLC Calculation
+tick_buffer_5min = defaultdict(lambda: deque())
+
+def get_verified_1min_volume(token, start_time_str):
+    """
+    Fetches the historical 1-minute candle volume using Kite API for a specific token and timestamp.
+    """
+    try:
+        from_datetime = datetime.datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
+        to_datetime = from_datetime + datetime.timedelta(minutes=1)
+
+        candles = kite.historical_data(
+            instrument_token=token,
+            from_date=from_datetime,
+            to_date=to_datetime,
+            interval="minute"
+        )
+
+        if candles:
+            return candles[0]['volume']
+        else:
+            logging.warning(f"No historical candle found for token {token} at {start_time_str}")
+            return 0
+    except Exception as e:
+        logging.error(f" Error fetching historical volume for token {token}: {e}")
+        return 0
+    
+
+#  Process Live OHLC Candles and Handle Nearest OTM Switching
+def process_ohlc_candle():
+    global current_ce_token, current_pe_token
+    global last_5min_processed  #Important to add this
+
+    current_time = datetime.datetime.now()
+    current_minute = current_time.strftime("%Y-%m-%d %H:%M")  #"YYYY-MM-DD HH:MM"
+
+    try:
+        conn = connect_to_db()
+        if not conn:
+            logging.error(" Cannot connect to database inside process_ohlc_candle()")
+            return
+
+        cur = conn.cursor()
+
+        # Step 2: Process 1-min Candle and Switch Nearest OTM if NEW 1-min window
+        if last_5min_processed != current_time.strftime("%Y-%m-%d %H:%M"):
+            # New 1-min window detected
+            last_5min_processed = current_time.strftime("%Y-%m-%d %H:%M")
+            logging.info(f"Detected new 1-minute window at {current_time}")
+
+            previous_minute = (current_time - datetime.timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M")
+
+            for token in [current_ce_token, current_pe_token]:
+                if previous_minute not in tick_buffer[token]:
+                    continue
+
+                ticks = list(tick_buffer[token][previous_minute])
+                if not ticks:
+                    continue
+
+                prices = [tick['last_price'] for tick in ticks]
+
+                one_min_entry = {
+                    "timestamp": previous_minute,
+                    "open": prices[0],
+                    "high": max(prices),
+                    "low": min(prices),
+                    "close": prices[-1],
+                    "volume": get_verified_1min_volume(token, previous_minute)
+                }
+
+                logging.info(f"1-min OHLC for Token {token}: {one_min_entry}")
+
+                # Determine table name for 1-min data
+                table_name = get_1min_table_for_token(token)
+
+                # Insert 1-min OHLC into table
+                cur.execute(f"""
+                    INSERT INTO {table_name} (timestamp, open, high, low, close, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (timestamp) DO NOTHING;
+                """, (
+                    one_min_entry["timestamp"], one_min_entry["open"], one_min_entry["high"],
+                    one_min_entry["low"], one_min_entry["close"], one_min_entry["volume"]
+                ))
+                conn.commit()
+
+                # Recalculate indicators on updated table
+                calculate_ema_for_table(table_name, length=5)
+                calculate_supertrend_channel_for_table(table_name)
+
+                # Clear tick buffer for that minute
+                del tick_buffer[token][previous_minute]
+            
+            # Step 3: After processing both tokens → Check nearest OTM contract switching
+            update_nearest_otm_contracts()
+
+            # Fetch latest nearest_otm_contracts from database
+            conn_check = connect_to_db()
+            if conn_check:
+                cur_check = conn_check.cursor()
+                cur_check.execute("""
+                    SELECT ce_token, pe_token
+                    FROM nearest_otm_contracts
+                    ORDER BY update_timestamp DESC
+                    LIMIT 1;
+                """)
+                new_result = cur_check.fetchone()
+
+                if new_result:
+                    new_ce_token, new_pe_token = new_result
+
+                    if new_ce_token != current_ce_token or new_pe_token != current_pe_token:
+                        logging.info(" Nearest OTM Contract Changed! Switching...")
+
+                        # Update current CE/PE tokens
+                        current_ce_token = new_ce_token
+                        current_pe_token = new_pe_token
+
+                        # Create new tables
+                        ce_symbol = get_symbol_from_token(current_ce_token)
+                        pe_symbol = get_symbol_from_token(current_pe_token)
+                        create_nearest_otm_ohlc_tables(ce_symbol, pe_symbol)
+
+                        # Fetch historical into new tables
+                        fetch_and_merge_ohlc_for_table(f"{ce_symbol.lower()}_ohlc_1min", current_ce_token, "minute")
+                        fetch_and_merge_ohlc_for_table(f"{pe_symbol.lower()}_ohlc_1min", current_pe_token, "minute")
+
+                        # Calculate indicators for fresh tables
+                        calculate_ema_for_table(f"{ce_symbol.lower()}_ohlc_1min", length=5)
+                        calculate_supertrend_channel_for_table(f"{ce_symbol.lower()}_ohlc_1min")
+
+                        calculate_ema_for_table(f"{pe_symbol.lower()}_ohlc_1min", length=5)
+                        calculate_supertrend_channel_for_table(f"{pe_symbol.lower()}_ohlc_1min")
+
+                        logging.info(" New Nearest OTM Switching completed successfully!")
+
+                cur_check.close()
+                conn_check.close()
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logging.error(f" Error inside process_ohlc_candle(): {e}")
+        if conn:
+            conn.rollback()
+            cur.close()
+            conn.close()
+
+#  Handle WebSocket Connection
+def on_connect(ws, response):
+    logging.info(" WebSocket Connected. Attempting subscription...")
+
+    try:
+        time.sleep(1)  # Small delay before subscribing (prevents race condition)
+        ws.subscribe(INSTRUMENT_TOKENS)
+        logging.info(f" Subscription request sent for: {INSTRUMENT_TOKENS}")
+
+        ws.set_mode(ws.MODE_FULL, INSTRUMENT_TOKENS)
+        logging.info(f" Mode set to FULL for: {INSTRUMENT_TOKENS}")
+
+        logging.info(" WebSocket is now actively listening for tick data...")
+
+    except Exception as e:
+        logging.error(f" Subscription failed: {e}")
+
+#  Handle Incoming Tick Data & Assign to Correct Minute
+def on_ticks(ws, ticks):
+    for tick in ticks:
+        
+        token = tick['instrument_token']
+
+        #  Small improvement: check if token belongs to the tracked INSTRUMENT_TOKENS
+        if token not in INSTRUMENT_TOKENS:
+            continue  # Ignore ticks for any irrelevant tokens (safety)
+
+        tick_time = tick['exchange_timestamp'].strftime("%Y-%m-%d %H:%M")  # Extract minute part
+        tick_buffer[token][tick_time].append(tick)  # Append tick to its respective minute
+
+#  Handle WebSocket Closure & Reconnection
+def on_close(ws, code, reason):
+    logging.warning(f" WebSocket Closed: {code}, Reason: {reason}")
+    logging.info(" Reconnecting in 5 seconds...")
+    time.sleep(5)
+    ws.connect(reconnect=True)
+
+#  Handle WebSocket Errors
+def on_error(ws, code, reason):
+    logging.error(f" WebSocket Error Occurred! Code: {code}, Reason: {reason}")
+
+    if "token" in reason.lower():
+        logging.error(" Possible access token issue! Fetch a new one and restart.")
+
+#  Handle Reconnection Attempts
+def on_reconnect(ws, attempts):
+    logging.warning(f" WebSocket Reconnecting... Attempt {attempts}")
+
+#  Assign Event Handlers to WebSocket
+kws.on_connect = on_connect
+kws.on_ticks = on_ticks
+kws.on_close = on_close
+kws.on_error = on_error
+kws.on_reconnect = on_reconnect
+
+#  Start WebSocket After Killing Any Existing WebSocket Processes
+kill_existing_websockets()
+logging.info(" Starting WebSocket connection...")
+kws.connect(threaded=True)
+
+#  Process OHLC Data Every half-second (Live loop)
+while True:
+    process_ohlc_candle()
+    time.sleep(0.5)
