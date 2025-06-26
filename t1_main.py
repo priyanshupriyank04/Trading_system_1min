@@ -502,7 +502,7 @@ MARKET_HOLIDAYS = {
 }
 
 #  Fetch last trading day's OHLC data for a single table (dynamic)
-def fetch_last_trading_day_ohlc_for_table(table_name, instrument_token, interval):
+def fetch_last_trading_day_ohlc_for_table(table_name, instrument_token, interval="minute"):
     """
     Fetches last trading day's OHLC data for the given table and instrument token.
     Used when switching nearest ITM CE/PE contracts dynamically.
@@ -572,10 +572,10 @@ def fetch_last_trading_day_ohlc_for_table(table_name, instrument_token, interval
         return None
 
 
-#  Fetch & Merge Today's Data for a Specific 5-Min Table (CE or PE)
-def fetch_and_merge_ohlc_for_table(table_name, instrument_token, interval="5minute"):
+#  Fetch & Merge Today's Data for a Specific 1-Min Table (CE or PE)
+def fetch_and_merge_ohlc_for_table(table_name, instrument_token, interval="minute"):
     """
-    Fetch and merge today's OHLC data (including last trading day's) for a 5-minute table.
+    Fetch and merge today's OHLC data (including last trading day's) for a 1-minute table.
     """
 
     conn = connect_to_db()
@@ -590,7 +590,8 @@ def fetch_and_merge_ohlc_for_table(table_name, instrument_token, interval="5minu
     # Step 2: Fetch Today's Data up to current completed candle
     now = datetime.datetime.now()
     from_date = now.replace(hour=9, minute=15, second=0).strftime("%Y-%m-%d %H:%M:%S")
-    to_date = now.replace(minute=(now.minute // 5) * 5, second=0).strftime("%Y-%m-%d %H:%M:%S")
+    to_date = now.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
 
     logging.info(f" Fetching today's {interval} data for {table_name} from {from_date} to {to_date}")
 
@@ -634,15 +635,15 @@ def fetch_and_merge_ohlc_for_table(table_name, instrument_token, interval="5minu
         cur.close()
         conn.close()
 
-fetch_and_merge_ohlc_for_table(nearest_contracts["CE"]["table_5min"], nearest_contracts["CE"]["token"], "5minute")
-fetch_and_merge_ohlc_for_table(nearest_contracts["PE"]["table_5min"], nearest_contracts["PE"]["token"], "5minute")
+fetch_and_merge_ohlc_for_table(nearest_contracts["CE"]["table_1min"], nearest_contracts["CE"]["token"], "minute")
+fetch_and_merge_ohlc_for_table(nearest_contracts["PE"]["table_1min"], nearest_contracts["PE"]["token"], "minute")
 
 import datetime
 
 def create_nearest_otm_contracts_table():
     """
     Drops (if exists) and creates the nearest_otm_contracts table cleanly,
-    tailored for 5-minute ADX-based strategies (no 1-min tables).
+    tailored for 1-minute strategies (no 5-min tables).
     """
     try:
         conn = connect_to_db()
@@ -655,15 +656,15 @@ def create_nearest_otm_contracts_table():
         cur.execute("DROP TABLE IF EXISTS nearest_otm_contracts;")
         logging.info(" Dropped existing nearest_otm_contracts table.")
 
-        # Create fresh table with only 5-min references
+        # Create fresh table with only 1-min references
         cur.execute("""
             CREATE TABLE nearest_otm_contracts (
                 ce_symbol TEXT,
                 ce_token BIGINT,
-                ce_table_5min TEXT,
+                ce_table_1min TEXT,
                 pe_symbol TEXT,
                 pe_token BIGINT,
-                pe_table_5min TEXT,
+                pe_table_1min TEXT,
                 update_timestamp TIMESTAMPTZ
             );
         """)
@@ -679,3 +680,178 @@ def create_nearest_otm_contracts_table():
 
 
 create_nearest_otm_contracts_table()
+
+
+def update_nearest_otm_contracts():
+    """
+    Fetches the latest Nifty price, finds nearest OTM CE/PE contracts,
+    and updates the nearest_otm_contracts table with only 1min table info.
+    """
+    try:
+        # Step 1: Fetch live Nifty price
+        nifty_price = get_nifty50_price()
+        if nifty_price is None:
+            logging.warning(" Failed to fetch Nifty 50 price while updating nearest OTM contracts.")
+            return
+
+        # Step 2: Get nearest OTM CE/PE contracts
+        nearest_otm = get_nearest_otm_ce_pe_tables(nifty_price)
+        if nearest_otm is None:
+            logging.warning(" Failed to fetch nearest OTM CE/PE contracts.")
+            return
+
+        current_timestamp = datetime.datetime.now()
+
+        # Step 3: Connect to DB
+        conn = connect_to_db()
+        if not conn:
+            logging.error(" Database connection failed during nearest OTM update.")
+            return
+        
+        cur = conn.cursor()
+
+        # Step 4: Clear old row
+        cur.execute("TRUNCATE TABLE nearest_otm_contracts;")
+
+        # Step 5: Insert new row
+        cur.execute("""
+            INSERT INTO nearest_otm_contracts (
+                ce_symbol, ce_token, ce_table_1min,
+                pe_symbol, pe_token, pe_table_1min,
+                update_timestamp
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """, (
+            nearest_otm["CE"]["symbol"],
+            nearest_otm["CE"]["token"],
+            nearest_otm["CE"]["table_1min"],
+            nearest_otm["PE"]["symbol"],
+            nearest_otm["PE"]["token"],
+            nearest_otm["PE"]["table_1min"],
+            current_timestamp
+        ))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        logging.info(f" Nearest OTM CE/PE contracts updated successfully at {current_timestamp}!")
+
+    except Exception as e:
+        logging.error(f" Error while updating nearest OTM contracts: {e}")
+
+
+update_nearest_otm_contracts()
+
+#  Initialize Current CE and PE Tokens from nearest_otm_contracts
+def initialize_current_tokens():
+    """
+    Fetches the latest CE and PE tokens from the nearest_otm_contracts table
+    and initializes global variables: current_ce_token and current_pe_token.
+    """
+    global current_ce_token, current_pe_token
+
+    try:
+        conn = connect_to_db()
+        if not conn:
+            logging.error(" Failed to connect to DB while initializing current tokens.")
+            return False
+
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT ce_token, pe_token 
+            FROM nearest_otm_contracts
+            ORDER BY update_timestamp DESC
+            LIMIT 1;
+        """)
+        result = cur.fetchone()
+
+        if result and len(result) == 2:
+            current_ce_token = result[0]
+            current_pe_token = result[1]
+            logging.info(f" Initialized Current CE Token: {current_ce_token}, PE Token: {current_pe_token}")
+            success = True
+        else:
+            logging.error(" No data found in nearest_otm_contracts table to initialize tokens.")
+            success = False
+
+        cur.close()
+        conn.close()
+        return success
+
+    except Exception as e:
+        logging.error(f" Error initializing current tokens: {e}")
+        return False
+
+
+#  Call this during setup
+initialize_current_tokens()
+
+import pandas as pd
+import numpy as np
+
+def calculate_ema_for_table(table_name: str, length: int):
+    """
+    Calculates Exponential Moving Average (EMA) of 'close' for a given length
+    and updates the specified table's corresponding column (ema_<length>).
+    """
+    column_name = f"ema_{length}"
+    try:
+        conn = connect_to_db()
+        if not conn:
+            logging.error(" DB connection failed for EMA calculation.")
+            return
+
+        cur = conn.cursor()
+
+        #  Step 1: Ensure EMA column exists
+        cur.execute(f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = %s AND column_name = %s;
+        """, (table_name, column_name))
+        result = cur.fetchone()
+
+        if not result:
+            cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} FLOAT;")
+            logging.info(f" Added missing column: {column_name} to table {table_name}")
+
+        #  Step 2: Fetch close prices
+        cur.execute(f"SELECT timestamp, close FROM {table_name} ORDER BY timestamp ASC;")
+        rows = cur.fetchall()
+        if not rows:
+            logging.warning(f" No data found in table {table_name} for EMA-{length} calculation.")
+            return
+
+        df = pd.DataFrame(rows, columns=["timestamp", "close"])
+
+        #  Step 3: Calculate EMA
+        df[column_name] = df["close"].ewm(span=length, adjust=False).mean()
+
+        #  Step 4: Update table
+        for _, row in df.iterrows():
+            cur.execute(
+                f"""
+                UPDATE {table_name}
+                SET {column_name} = %s
+                WHERE timestamp = %s;
+                """,
+                (
+                    round(row[column_name], 4) if not pd.isna(row[column_name]) else None,
+                    row["timestamp"]
+                )
+            )
+
+        conn.commit()
+        logging.info(f" EMA-{length} updated for table {table_name}")
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logging.error(f" Error in calculate_ema_for_table({table_name}, {length}): {e}")
+
+
+calculate_ema_for_table(nearest_contracts["CE"]["table_1min"], length=5)
+calculate_ema_for_table(nearest_contracts["PE"]["table_1min"], length=5)
+
