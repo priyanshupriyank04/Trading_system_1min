@@ -855,3 +855,216 @@ def calculate_ema_for_table(table_name: str, length: int):
 calculate_ema_for_table(nearest_contracts["CE"]["table_1min"], length=5)
 calculate_ema_for_table(nearest_contracts["PE"]["table_1min"], length=5)
 
+def calculate_supertrend_channel_for_table(table_name):
+    """
+    Calculates HL2, ATR, Initial Bands, Supertrend Upper/Lower, Oscillation State,
+    Supertrend Pivot, Max/Min Channels, and Supertrend Average for a single OHLC table.
+    """
+
+    try:
+        conn = connect_to_db()
+        if not conn:
+            logging.error(" DB connection failed.")
+            return
+
+        cur = conn.cursor()
+
+        logging.info(f" Starting Supertrend Channel calculation for table: {table_name}")
+
+        # Step 1: Fetch required OHLC data
+        cur.execute(f"""
+            SELECT timestamp, high, low, close
+            FROM {table_name}
+            ORDER BY timestamp;
+        """)
+        rows = cur.fetchall()
+
+        if not rows:
+            logging.warning(f" No OHLC data found in {table_name}. Skipping...")
+            return
+
+        df = pd.DataFrame(rows, columns=["timestamp", "high", "low", "close"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+        # Step 2: HL2 Calculation
+        df["hl2"] = (df["high"] + df["low"]) / 2
+
+    
+
+        # --- ATR Calculation ---
+        ATR_LENGTH = 10
+        ATR_MULTIPLIER = 3
+        df["true_range"] = 0.0
+        df["atr"] = 0.0
+
+        for i in range(1, len(df)):
+            high = df.iloc[i]['high']
+            low = df.iloc[i]['low']
+            prev_close = df.iloc[i - 1]['close']
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            df.at[df.index[i], 'true_range'] = tr
+
+        for i in range(len(df)):
+            if i == 0:
+                df.at[df.index[i], 'atr'] = 0.0
+            elif i < ATR_LENGTH:
+                df.at[df.index[i], 'atr'] = df['true_range'][:i+1].mean()
+            else:
+                prev_atr = df.iloc[i-1]['atr']
+                tr = df.iloc[i]['true_range']
+                df.at[df.index[i], 'atr'] = ((prev_atr * (ATR_LENGTH - 1)) + tr) / ATR_LENGTH
+
+        df['atr'] *= ATR_MULTIPLIER
+        df.drop(columns=['true_range'], inplace=True)
+
+        # Initial Upper Band Calculation
+        df["initial_upper_bar"] = df["hl2"] + df["atr"]
+
+        # Initial Lower Band Calculation
+        df["initial_lower_bar"] = df["hl2"] - df["atr"]
+
+        # Supertrend Upper Band Calculation
+        df["supertrend_upper"] = 0.0
+        for i in range(len(df)):
+            if i == 0:
+                df.at[i, "supertrend_upper"] = df.at[i, "initial_upper_bar"]
+            else:
+                prev_upper = df.at[i - 1, "supertrend_upper"]
+                initial_upper = df.at[i, "initial_upper_bar"]
+                prev_close = df.at[i - 1, "close"]
+
+                if prev_close < prev_upper:
+                    df.at[i, "supertrend_upper"] = min(initial_upper, prev_upper)
+                else:
+                    df.at[i, "supertrend_upper"] = initial_upper
+
+
+        #Supertrend Lower Band Calculation
+        df["supertrend_lower"] = 0.0
+        for i in range(len(df)):
+            if i == 0:
+                df.at[i, "supertrend_lower"] = df.at[i, "initial_lower_bar"]
+            else:
+                prev_lower = df.at[i - 1, "supertrend_lower"]
+                initial_lower = df.at[i, "initial_lower_bar"]
+                prev_close = df.at[i - 1, "close"]
+
+                if prev_close >= prev_lower:
+                    df.at[i, "supertrend_lower"] = max(initial_lower, prev_lower)
+                else:
+                    df.at[i, "supertrend_lower"] = initial_lower
+
+        # --- Oscillation State (os) Calculation ---
+        df["os"] = 0  # Default Bearish
+
+        for i in range(len(df)):
+            close = df.at[i, "close"]
+            upper_band = df.at[i, "supertrend_upper"]
+            lower_band = df.at[i, "supertrend_lower"]
+
+            if close > upper_band:
+                df.at[i, "os"] = 1  # Bullish
+            elif close < lower_band:
+                df.at[i, "os"] = 0  # Bearish
+            else:
+                df.at[i, "os"] = df.at[i - 1, "os"] if i > 0 else 0
+
+        # --- Supertrend Pivot (spt) Calculation ---
+        df['spt'] = df.apply(
+            lambda row: row['supertrend_lower'] if row['os'] == 1 else row['supertrend_upper'],
+            axis=1
+        )
+
+        # --- Max Channel Calculation ---
+        df['max_channel'] = 0.0
+
+        for i in range(len(df)):
+            close = df.at[i, 'close']
+            os = df.at[i, 'os']
+            spt = df.at[i, 'spt']
+
+            if i == 0:
+                df.at[i, 'max_channel'] = close
+            else:
+                prev_max_channel = df.at[i - 1, 'max_channel']
+                prev_os = df.at[i - 1, 'os']
+
+                if close > spt:
+                    df.at[i, 'max_channel'] = max(prev_max_channel, close)
+                elif os == 1:
+                    df.at[i, 'max_channel'] = max(close, prev_max_channel)
+                else:
+                    df.at[i, 'max_channel'] = min(spt, prev_max_channel)
+
+        # --- Min Channel Calculation ---
+        df['min_channel'] = 0.0
+
+        for i in range(len(df)):
+            close = df.at[i, 'close']
+            os = df.at[i, 'os']
+            spt = df.at[i, 'spt']
+
+            if i == 0:
+                df.at[i, 'min_channel'] = close
+            else:
+                prev_min_channel = df.at[i - 1, 'min_channel']
+                prev_os = df.at[i - 1, 'os']
+
+                if close < spt:
+                    df.at[i, 'min_channel'] = min(prev_min_channel, close)
+                elif os == 0:
+                    df.at[i, 'min_channel'] = min(close, prev_min_channel)
+                else:
+                    df.at[i, 'min_channel'] = max(spt, prev_min_channel)
+        
+        # --- Supertrend Average Channel Calculation ---
+        df['supertrend_avg'] = (df['max_channel'] + df['min_channel']) / 2
+
+
+        df['timestamp'] = df['timestamp'].astype(str)
+
+        update_query = f"""
+            UPDATE {table_name}
+            SET max_channel = %s,
+                min_channel = %s,
+                supertrend_avg = %s
+            WHERE timestamp = %s;
+        """
+
+        for _, row in df.iterrows():
+            cur.execute(update_query, (
+                row['max_channel'],
+                row['min_channel'],
+                row['supertrend_avg'],
+                row['timestamp']
+            ))
+
+        conn.commit()
+        logging.info(f" Supertrend Channel (max, min, avg) values updated successfully in {table_name}")
+
+        # Drop unnecessary columns from the table
+        cur.execute(f"""
+            ALTER TABLE {table_name}
+            DROP COLUMN IF EXISTS hl2,
+            DROP COLUMN IF EXISTS atr,
+            DROP COLUMN IF EXISTS initial_upper_bar,
+            DROP COLUMN IF EXISTS initial_lower_bar,
+            DROP COLUMN IF EXISTS supertrend_upper,
+            DROP COLUMN IF EXISTS supertrend_lower,
+            DROP COLUMN IF EXISTS os,
+            DROP COLUMN IF EXISTS spt;
+        """)
+        conn.commit()
+
+        # We'll update DB only once after all calculations
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logging.error(f" Error in calculate_supertrend_channel_for_table({table_name}): {e}")
+
+
+
+calculate_supertrend_channel_for_table(nearest_contracts['CE']['table_1min'])
+calculate_supertrend_channel_for_table(nearest_contracts['PE']['table_1min'])
+
