@@ -308,7 +308,9 @@ def create_nearest_otm_ohlc_tables(ce_symbol, pe_symbol):
                     ema_5 FLOAT,                    
                     max_channel FLOAT,
                     min_channel FLOAT,
-                    supertrend_avg FLOAT
+                    supertrend_avg FLOAT,
+                    stoch_rsi_k FLOAT,
+                    stoch_rsi_d FLOAT
                 );
             """)
 
@@ -324,7 +326,9 @@ def create_nearest_otm_ohlc_tables(ce_symbol, pe_symbol):
                     ema_5 FLOAT,
                     max_channel FLOAT,
                     min_channel FLOAT,
-                    supertrend_avg FLOAT
+                    supertrend_avg FLOAT,
+                    stoch_rsi_k FLOAT,
+                    stoch_rsi_d FLOAT
                 );
             """)
 
@@ -1043,6 +1047,93 @@ def calculate_supertrend_channel_for_table(table_name):
 calculate_supertrend_channel_for_table(nearest_contracts['CE']['table_1min'])
 calculate_supertrend_channel_for_table(nearest_contracts['PE']['table_1min'])
 
+def calculate_stoch_rsi_for_table(table_name: str, rsi_length=14, stoch_length=14, smooth_k=3, smooth_d=3):
+    """
+    Calculates the Stochastic RSI %K and %D and updates the given table.
+    Adds new columns: stoch_rsi_k, stoch_rsi_d
+    """
+    try:
+        conn = connect_to_db()
+        if not conn:
+            logging.error(" DB connection failed for Stoch RSI calculation.")
+            return
+
+        cur = conn.cursor()
+
+        # Step 1: Ensure required columns exist
+        for column in ['stoch_rsi_k', 'stoch_rsi_d']:
+            cur.execute(f"""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = %s AND column_name = %s;
+            """, (table_name, column))
+            if not cur.fetchone():
+                cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} FLOAT;")
+                logging.info(f" Added missing column: {column} to table {table_name}")
+
+        # Step 2: Fetch close prices
+        cur.execute(f"SELECT timestamp, close FROM {table_name} ORDER BY timestamp ASC;")
+        rows = cur.fetchall()
+        if not rows:
+            logging.warning(f" No data found in table {table_name} for Stoch RSI calculation.")
+            return
+
+        df = pd.DataFrame(rows, columns=["timestamp", "close"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+        # Step 3: Calculate RSI first
+        delta = df["close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+
+        avg_gain = gain.ewm(alpha=1/rsi_length, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/rsi_length, adjust=False).mean()
+
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        df["rsi"] = rsi
+
+        # Step 4: Calculate Stochastic RSI
+        min_rsi = df["rsi"].rolling(window=stoch_length).min()
+        max_rsi = df["rsi"].rolling(window=stoch_length).max()
+
+        stoch_rsi = (df["rsi"] - min_rsi) / (max_rsi - min_rsi)
+        stoch_rsi_k = stoch_rsi.rolling(window=smooth_k).mean()
+        stoch_rsi_d = stoch_rsi_k.rolling(window=smooth_d).mean()
+
+        df["stoch_rsi_k"] = stoch_rsi_k * 100
+        df["stoch_rsi_d"] = stoch_rsi_d * 100
+
+        # Step 5: Update values into DB
+        for _, row in df.iterrows():
+            cur.execute(
+                f"""
+                UPDATE {table_name}
+                SET stoch_rsi_k = %s,
+                    stoch_rsi_d = %s
+                WHERE timestamp = %s;
+                """,
+                (
+                    round(row["stoch_rsi_k"], 4) if not pd.isna(row["stoch_rsi_k"]) else None,
+                    round(row["stoch_rsi_d"], 4) if not pd.isna(row["stoch_rsi_d"]) else None,
+                    row["timestamp"]
+                )
+            )
+
+        conn.commit()
+        logging.info(f" Stoch RSI (%K and %D) updated for table {table_name}")
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logging.error(f" Error in calculate_stoch_rsi_for_table({table_name}): {e}")
+
+
+calculate_stoch_rsi_for_table(nearest_contracts["CE"]["table_1min"])
+calculate_stoch_rsi_for_table(nearest_contracts["PE"]["table_1min"])
+
+
 
 def get_1min_table_for_token(token):
     """
@@ -1232,6 +1323,7 @@ def process_ohlc_candle():
                 # Recalculate indicators on updated table
                 calculate_ema_for_table(table_name, length=5)
                 calculate_supertrend_channel_for_table(table_name)
+                calculate_stoch_rsi_for_table(table_name)
 
                 # Clear tick buffer for that minute
                 del tick_buffer[token][previous_minute]
@@ -1273,9 +1365,11 @@ def process_ohlc_candle():
                         # Calculate indicators for fresh tables
                         calculate_ema_for_table(f"{ce_symbol.lower()}_ohlc_1min", length=5)
                         calculate_supertrend_channel_for_table(f"{ce_symbol.lower()}_ohlc_1min")
+                        calculate_stoch_rsi_for_table(f"{ce_symbol.lower()}_ohlc_1min")
 
                         calculate_ema_for_table(f"{pe_symbol.lower()}_ohlc_1min", length=5)
                         calculate_supertrend_channel_for_table(f"{pe_symbol.lower()}_ohlc_1min")
+                        calculate_stoch_rsi_for_table(f"{pe_symbol.lower()}_ohlc_1min")
 
                         logging.info(" New Nearest OTM Switching completed successfully!")
 
