@@ -76,7 +76,7 @@ Stores the current CE & PE tokens and table references used by the strategy.
 - ✅ PostgreSQL Database (default: `postgres/postgres/admin123`)
 - ✅ Python 3.8+
 - ✅ Required packages:
-```bash
+bash
 pip install kiteconnect psycopg2 pandas
 
 
