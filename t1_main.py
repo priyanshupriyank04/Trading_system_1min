@@ -171,16 +171,16 @@ def get_custom_nifty_expiry():
 
 
 
-    if today <= datetime.date(today.year, 6, 5):
-        return datetime.date(today.year, 6, 5)  # Weekly expiry
-    elif today <= datetime.date(today.year, 6, 12):
-        return datetime.date(today.year, 6, 12)  # Weekly expiry
-    elif today <= datetime.date(today.year, 6, 19):
-        return datetime.date(today.year, 6, 19)  # Monthly expiry
-    elif today <= datetime.date(today.year, 6, 26):
-        return datetime.date(today.year, 6, 26)  # Weekly expiry
-    elif today <= datetime.date(today.year, 7, 3):
-        return datetime.date(today.year, 7, 3)  # Weekly expiry
+    if today <= datetime.date(today.year, 7, 10):
+        return datetime.date(today.year, 7, 10)  # Weekly expiry
+    elif today <= datetime.date(today.year, 7, 17):
+        return datetime.date(today.year, 7, 17)  # Weekly expiry
+    elif today <= datetime.date(today.year, 7, 24):
+        return datetime.date(today.year, 7, 24)  # Weekly expiry
+    elif today <= datetime.date(today.year, 7, 31):
+        return datetime.date(today.year, 7, 31)  # Monthly expiry (default)
+    elif today <= datetime.date(today.year, 8, 7):
+        return datetime.date(today.year, 8, 7)  # Weekly expiry
     else:
         logging.error(" No predefined expiry date available for current date.")
         return None
