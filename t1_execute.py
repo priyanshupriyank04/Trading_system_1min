@@ -706,41 +706,44 @@ while True:
             if ema_list[i]["ema_5"] - ema_list[i + 1]["ema_5"] >= 0.7:
                 ema_drops += 1
 
-
+        # Verbose debug logging for CE condition evaluation
+        logging.info(f"🔍 CE Condition Check Values:")
+        logging.info(f"ema_5 c0: {ce_c0['ema_5']}, ema_5 c1: {ce_c1['ema_5']} | ema_5 > abs(ema_5 + 0.7): {ce_c0['ema_5'] > abs(ce_c1['ema_5'] + 0.7)}")
+        logging.info(f"stoch_rsi_k: {ce_c0['stoch_rsi_k']}, stoch_rsi_d: {ce_c0['stoch_rsi_d']} | K > D+4: {ce_c0['stoch_rsi_k'] >= abs(ce_c0['stoch_rsi_d'] + 4)}")
+        logging.info(f"stoch_rsi_k < 55: {ce_c0['stoch_rsi_k']} < 55 = {ce_c0['stoch_rsi_k'] < 55}")
+        logging.info(f"ema_drops in last 7 candles: {ema_drops} (>=3): {ema_drops >= 3}")
+        logging.info(f"ema_5 c0: {ce_c0['ema_5']} < ema_5 c5: {ce_c5['ema_5']} = {ce_c0['ema_5'] < ce_c5['ema_5']}")
+        gap_check = ce_c0["close"] + (ce_c0["close"] - ce_c0["low"])
+        logging.info(f"max_channel: {ce_c0['max_channel']} >= close + (close - low): {gap_check} = {ce_c0['max_channel'] >= gap_check}")
 
         if (
-            ce_c0["ema_5"] > abs(ce_c1["ema_5"]+ 0.7) and  # 5ema(0) > 5ema(-1)
-            ce_c0["stoch_rsi_k"] >= abs(ce_c0["stoch_rsi_d"] + 4) and  # K > D
-            ce_c0["stoch_rsi_k"] < 55 and  # K < 55 means D will also be less than 55
-            ema_drops >= 3 and  # minimum 3 0.7pts ema drops in the 7 candle window condition
-            ce_c0["ema_5"] < ce_c5["ema_5"] and  # 5ema(0) < 5ema(-5)
-            ce_c0["max_channel"] >= ce_c0["close"] + (ce_c0["close"] - ce_c0["low"])  # atleast close - low gap available up till before supertrend upper channel
+            ce_c0["ema_5"] > abs(ce_c1["ema_5"] + 0.7) and
+            ce_c0["stoch_rsi_k"] >= abs(ce_c0["stoch_rsi_d"] + 4) and
+            ce_c0["stoch_rsi_k"] < 55 and
+            ema_drops >= 3 and
+            ce_c0["ema_5"] < ce_c5["ema_5"] and
+            ce_c0["max_channel"] >= ce_c0["close"] + (ce_c0["close"] - ce_c0["low"])
         ):
             logging.info("✅ All alert conditions satisfied for 1-min CE strategy. Proceeding to trigger condition.")
 
-            try:
-                ce_ltp_data = kite.ltp(ce_symbol)
-                ce_ltp = ce_ltp_data.get(ce_symbol, {}).get("last_price")
+            ce_ltp = latest_ce_price
 
-                if ce_ltp is None:
-                    logging.warning(" Unable to fetch CE LTP. Skipping alert.")
-                else:
-                    risk = abs(ce_c0["close"] - ce_c0["low"])
-                    t1_target = round(ce_ltp + risk, 2)
-                    t2_target = round(ce_ltp + 2 * risk, 2)
+            if ce_ltp is None:
+                logging.warning(" Unable to fetch CE LTP. Skipping alert.")
+            else:
+                risk = abs(ce_c0["close"] - ce_c0["low"])
+                t1_target = round(ce_ltp + risk, 2)
+                t2_target = round(ce_ltp + 2 * risk, 2)
 
-                    ce_alert = True
-                    active_alert["timestamp"] = ce_c0["timestamp"]
-                    active_alert["trigger_high"] = ce_c0["close"]
-                    active_alert["stop_loss"] = ce_c0["low"]
-                    active_alert["target"] = t1_target
+                ce_alert = True
+                active_alert["timestamp"] = ce_c0["timestamp"]
+                active_alert["trigger_high"] = ce_c0["close"]
+                active_alert["stop_loss"] = ce_c0["low"]
+                active_alert["target"] = t1_target
 
-                    trigger_monitoring_start = datetime.datetime.now()
+                trigger_monitoring_start = datetime.datetime.now()
 
-                    logging.info(f" CE LTP: {ce_ltp}, T1: {t1_target}, T2: {t2_target}")
-
-            except Exception as e:
-                logging.error(f" Error fetching CE LTP or calculating targets: {e}")
+                logging.info(f" CE LTP: {ce_ltp}, T1: {t1_target}, T2: {t2_target}")
 
         else:
             logging.info("❌ CE alert condition not met for 1-min strategy. Skipping.")
@@ -763,7 +766,7 @@ while True:
                 logging.info(f" CE Buy Order Placed: {ce_symbol} | Order ID: {order_id}")
                 log_trade_to_csv("CE", ce_symbol)
 
-                entry_price = ce_ltp  # LTP already fetched earlier
+                entry_price = ce_ltp
                 stop_loss = active_alert["stop_loss"]
                 risk = abs(entry_price - stop_loss)
                 target_price = round(entry_price + risk, 2)
@@ -774,8 +777,7 @@ while True:
                 # Start trade monitoring
                 while trade_active_ce:
                     try:
-                        ce_ltp_data = kite.ltp(ce_symbol)
-                        latest_ce_ltp = ce_ltp_data.get(ce_symbol, {}).get("last_price")
+                        latest_ce_ltp = latest_ce_price
 
                         if latest_ce_ltp is None:
                             logging.warning(" Failed to fetch CE LTP during trade. Retrying...")
@@ -791,7 +793,7 @@ while True:
                                 exchange=kite.EXCHANGE_NFO,
                                 tradingsymbol=ce_symbol,
                                 transaction_type=kite.TRANSACTION_TYPE_SELL,
-                                quantity=0,  # Replace with actual quantity
+                                quantity=0,
                                 order_type=kite.ORDER_TYPE_MARKET,
                                 product=kite.PRODUCT_MIS
                             )
@@ -805,7 +807,7 @@ while True:
                                 exchange=kite.EXCHANGE_NFO,
                                 tradingsymbol=ce_symbol,
                                 transaction_type=kite.TRANSACTION_TYPE_SELL,
-                                quantity=0,  # Replace with actual quantity
+                                quantity=0,
                                 order_type=kite.ORDER_TYPE_MARKET,
                                 product=kite.PRODUCT_MIS
                             )
@@ -822,6 +824,7 @@ while True:
                 logging.error(f" CE Buy Order Failed: {e}")
         else:
             logging.info("❌ CE Alert NOT satisfied for 1-min strategy. Skipping.")
+
 
 
 
@@ -880,45 +883,48 @@ while True:
             if ema_list[i]["ema_5"] - ema_list[i + 1]["ema_5"] >= 0.7:
                 ema_drops += 1
 
+        logging.info(f"🔍 PE Condition Check Values:")
+        logging.info(f"ema_5 c0: {pe_c0['ema_5']}, ema_5 c1: {pe_c1['ema_5']} | ema_5 > abs(ema_5 + 0.7): {pe_c0['ema_5'] > abs(pe_c1['ema_5'] + 0.7)}")
+        logging.info(f"stoch_rsi_k: {pe_c0['stoch_rsi_k']}, stoch_rsi_d: {pe_c0['stoch_rsi_d']} | K > D+4: {pe_c0['stoch_rsi_k'] >= abs(pe_c0['stoch_rsi_d'] + 4)}")
+        logging.info(f"stoch_rsi_k < 55: {pe_c0['stoch_rsi_k']} < 55 = {pe_c0['stoch_rsi_k'] < 55}")
+        logging.info(f"ema_drops in last 7 candles: {ema_drops} (>=3): {ema_drops >= 3}")
+        logging.info(f"ema_5 c0: {pe_c0['ema_5']} < ema_5 c5: {pe_c5['ema_5']} = {pe_c0['ema_5'] < pe_c5['ema_5']}")
+        gap_check = pe_c0["close"] + (pe_c0["close"] - pe_c0["low"])
+        logging.info(f"max_channel: {pe_c0['max_channel']} >= close + (close - low): {gap_check} = {pe_c0['max_channel'] >= gap_check}")    
 
         if (
-            pe_c0["ema_5"] > abs(pe_c1["ema_5"]+0.7) and  # Latest 5 EMA > previous
-            pe_c0["stoch_rsi_k"] >= abs(pe_c0["stoch_rsi_d"] + 4) and  # K >= D + 4
-            pe_c0["stoch_rsi_k"] < 55 and # K < 55 means D will also be greater than 55
-            ema_drops >= 3 and  # min 3 0.7 pts drop in the ema for 7 candle window
-            pe_c0["ema_5"] < pe_c5["ema_5"] and  # 5ema(0)<5ema(-5)
-            pe_c0["max_channel"] >= pe_c0["close"] + (pe_c0["close"] - pe_c0["low"]) # close - low gap up till before supertrend upper channel 
+            pe_c0["ema_5"] > abs(pe_c1["ema_5"] + 0.7) and
+            pe_c0["stoch_rsi_k"] >= abs(pe_c0["stoch_rsi_d"] + 4) and
+            pe_c0["stoch_rsi_k"] < 55 and
+            ema_drops >= 3 and
+            pe_c0["ema_5"] < pe_c5["ema_5"] and
+            pe_c0["max_channel"] >= pe_c0["close"] + (pe_c0["close"] - pe_c0["low"])
         ):
             logging.info("✅ All alert conditions satisfied for 1-min PE strategy. Proceeding to trigger condition.")
 
-            try:
-                pe_ltp_data = kite.ltp(pe_symbol)
-                pe_ltp = pe_ltp_data.get(pe_symbol, {}).get("last_price")
+            pe_ltp = latest_pe_price
 
-                if pe_ltp is None:
-                    logging.warning(" Unable to fetch PE LTP. Skipping alert.")
-                else:
-                    risk = abs(pe_c0["close"] - pe_c0["low"])
-                    t1_target = round(pe_ltp + risk, 2)
-                    t2_target = round(pe_ltp + 2 * risk, 2)
+            if pe_ltp is None:
+                logging.warning(" Unable to fetch PE LTP. Skipping alert.")
+            else:
+                risk = abs(pe_c0["close"] - pe_c0["low"])
+                t1_target = round(pe_ltp + risk, 2)
+                t2_target = round(pe_ltp + 2 * risk, 2)
 
-                    pe_alert = True
-                    active_alert["timestamp"] = pe_c0["timestamp"]
-                    active_alert["trigger_high"] = pe_c0["close"]
-                    active_alert["stop_loss"] = pe_c0["low"]
-                    active_alert["target"] = t1_target
+                pe_alert = True
+                active_alert["timestamp"] = pe_c0["timestamp"]
+                active_alert["trigger_high"] = pe_c0["close"]
+                active_alert["stop_loss"] = pe_c0["low"]
+                active_alert["target"] = t1_target
 
-                    trigger_monitoring_start = datetime.datetime.now()
+                trigger_monitoring_start = datetime.datetime.now()
 
-                    logging.info(f" PE LTP: {pe_ltp}, T1: {t1_target}, T2: {t2_target}")
-
-            except Exception as e:
-                logging.error(f" Error fetching PE LTP or calculating targets: {e}")
+                logging.info(f" PE LTP: {pe_ltp}, T1: {t1_target}, T2: {t2_target}")
 
         else:
             logging.info("❌ PE alert condition not met for 1-min strategy. Skipping.")
 
-        
+
         if pe_alert:
             logging.info("✅ PE Alert Condition Satisfied (on OTM PE) for 1-min strategy! Executing PE Buy Order immediately...")
 
@@ -928,15 +934,15 @@ while True:
                     exchange=kite.EXCHANGE_NFO,
                     tradingsymbol=pe_symbol,
                     transaction_type=kite.TRANSACTION_TYPE_BUY,
-                    quantity=0,  # Replace with actual quantity
+                    quantity=0,
                     order_type=kite.ORDER_TYPE_MARKET,
                     product=kite.PRODUCT_MIS
                 )
 
                 logging.info(f" PE Buy Order Placed: {pe_symbol} | Order ID: {order_id}")
-                log_trade_to_csv("PE", pe_symbol)  # Save to trades.csv
+                log_trade_to_csv("PE", pe_symbol)
 
-                entry_price = pe_ltp  # LTP already fetched during alert
+                entry_price = pe_ltp
                 stop_loss = active_alert["stop_loss"]
                 risk = abs(entry_price - stop_loss)
                 target_price = round(entry_price + risk, 2)
@@ -944,11 +950,9 @@ while True:
                 trade_active_pe = True
                 logging.info(f" PE SL: {stop_loss}, Target: {target_price}")
 
-                # Trade Monitoring Loop
                 while trade_active_pe:
                     try:
-                        pe_ltp_data = kite.ltp(pe_symbol)
-                        latest_pe_ltp = pe_ltp_data.get(pe_symbol, {}).get("last_price")
+                        latest_pe_ltp = latest_pe_price
 
                         if latest_pe_ltp is None:
                             logging.warning(" Failed to fetch PE LTP during trade. Retrying...")
@@ -964,7 +968,7 @@ while True:
                                 exchange=kite.EXCHANGE_NFO,
                                 tradingsymbol=pe_symbol,
                                 transaction_type=kite.TRANSACTION_TYPE_SELL,
-                                quantity=0,  # Replace with actual quantity
+                                quantity=0,
                                 order_type=kite.ORDER_TYPE_MARKET,
                                 product=kite.PRODUCT_MIS
                             )
@@ -978,7 +982,7 @@ while True:
                                 exchange=kite.EXCHANGE_NFO,
                                 tradingsymbol=pe_symbol,
                                 transaction_type=kite.TRANSACTION_TYPE_SELL,
-                                quantity=0,  # Replace with actual quantity
+                                quantity=0,
                                 order_type=kite.ORDER_TYPE_MARKET,
                                 product=kite.PRODUCT_MIS
                             )
